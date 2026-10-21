@@ -56,6 +56,27 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def _origin(value: str) -> tuple[str, str, int] | None:
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+        port = parsed.port
+        if port is None:
+            port = 443 if parsed.scheme == "https" else 80
+        return parsed.scheme, parsed.hostname.lower(), port
+    except ValueError:
+        return None
+
+
 @dataclass
 class Session:
     expires: float
@@ -64,7 +85,10 @@ class Session:
 
 
 class AdminAuth:
-    def __init__(self, password: str, *, secure_cookie: bool = False):
+    def __init__(self, password: str, *, secure_cookie: bool = False, public_origin: str = ""):
+        self.public_origin = _origin(public_origin) if public_origin else None
+        if public_origin and self.public_origin is None:
+            raise ValueError("RELAY_ADMIN_ORIGIN must be an http(s) origin without a path")
         # Keep a salted, expensive verifier in memory, never a plaintext copy.
         self.configured = (
             12 <= len(password) <= 1024
@@ -94,6 +118,7 @@ class AdminAuth:
             password,
             secure_cookie=os.environ.get("RELAY_ADMIN_COOKIE_SECURE", "").lower()
             in {"1", "true", "yes"},
+            public_origin=os.environ.get("RELAY_ADMIN_ORIGIN", "").strip().rstrip("/"),
         )
         if not instance.configured:
             logging.getLogger(__name__).warning(
@@ -192,18 +217,10 @@ def same_origin(request: Request) -> bool:
     origin = request.headers.get("origin")
     if not origin:
         return True  # Non-browser clients still need a session and CSRF token.
-    try:
-        parsed = urlsplit(origin)
-        return (
-            parsed.scheme in {"http", "https"}
-            and parsed.scheme == request.url.scheme
-            and parsed.netloc.lower() == request.url.netloc.lower()
-            and not parsed.path
-            and not parsed.query
-            and not parsed.fragment
-        )
-    except ValueError:
-        return False
+    service = request.app.state.admin_auth
+    expected = service.public_origin or _origin(f"{request.url.scheme}://{request.url.netloc}")
+    actual = _origin(origin)
+    return actual is not None and actual == expected
 
 
 def _error(status: int, message: str, **headers) -> JSONResponse:
@@ -285,11 +302,14 @@ def install(app: FastAPI, admin: AdminAuth) -> None:
         service = request.app.state.admin_auth
         if not service.configured:
             return _error(503, "请设置至少 12 位的 RELAY_ADMIN_PASSWORD 并重启服务")
-        if (
-            not same_origin(request)
-            or request.headers.get("content-type", "").split(";")[0].strip() != "application/json"
-        ):
-            return _error(403, "请求来源或格式无效")
+        if not same_origin(request):
+            return _error(
+                403,
+                "请求来源校验失败：使用反向代理时，请将 RELAY_ADMIN_ORIGIN 设置为浏览器访问的"
+                "完整来源（协议、域名及非默认端口），并重新创建容器",
+            )
+        if request.headers.get("content-type", "").split(";")[0].strip() != "application/json":
+            return _error(403, "请求格式无效：需要 application/json")
         host = request.client.host if request.client else "unknown"
         if not service.allow_attempt(host):
             return _error(429, "登录尝试过多，请 5 分钟后重试", **{"Retry-After": "300"})
@@ -319,7 +339,9 @@ def install(app: FastAPI, admin: AdminAuth) -> None:
             token,
             max_age=SESSION_SECONDS,
             httponly=True,
-            secure=service.secure_cookie or request.url.scheme == "https",
+            secure=service.secure_cookie
+            or request.url.scheme == "https"
+            or bool(service.public_origin and service.public_origin[0] == "https"),
             samesite="lax",
             path="/",
         )

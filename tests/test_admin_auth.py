@@ -115,6 +115,65 @@ def test_explicit_secure_cookie(service):
         assert "Secure" in response.headers["set-cookie"]
 
 
+def test_proxy_origin_supports_login_and_csrf_over_internal_http(monkeypatch):
+    monkeypatch.setenv("RELAY_ADMIN_PASSWORD", PASSWORD)
+    monkeypatch.setenv("RELAY_ADMIN_PASSWORD_FILE", "")
+    monkeypatch.setenv("RELAY_ADMIN_ORIGIN", "https://relay.example.com/")
+    service = admin_auth.AdminAuth.from_env()
+    monkeypatch.setattr(main.app.state, "admin_auth", service)
+    with TestClient(main.app, base_url="http://relay:8000") as client:
+        headers = {"Origin": "https://relay.example.com"}
+        response = client.post("/api/admin/login", json={"password": PASSWORD}, headers=headers)
+        assert response.status_code == 200
+        assert "Secure" in response.headers["set-cookie"]
+        # The browser sends this HTTPS cookie to Nginx, which forwards it over HTTP.
+        cookie = response.headers["set-cookie"].split(";", 1)[0]
+        headers.update({"Cookie": cookie, "X-Admin-CSRF": response.json()["csrf_token"]})
+        assert client.post("/api/admin/oauth-state", headers=headers).status_code == 200
+        for origin in ("https://attacker.example", "http://relay.example.com"):
+            rejected = {**headers, "Origin": origin}
+            assert client.post("/api/admin/oauth-state", headers=rejected).status_code == 403
+            assert client.post(
+                "/api/admin/login", json={"password": PASSWORD}, headers=rejected
+            ).status_code == 403
+        assert client.post(
+            "/api/admin/login",
+            json={"password": PASSWORD},
+            headers={**headers, "Sec-Fetch-Site": "cross-site"},
+        ).status_code == 403
+
+
+def test_untrusted_forwarded_headers_cannot_supply_public_origin(client):
+    response = client.post(
+        "/api/admin/login",
+        json={"password": PASSWORD},
+        headers={
+            "Origin": "https://attacker.example",
+            "X-Forwarded-Host": "attacker.example",
+            "X-Forwarded-Proto": "https",
+        },
+    )
+    assert response.status_code == 403
+    assert "RELAY_ADMIN_ORIGIN" in response.json()["error"]
+
+
+@pytest.mark.parametrize("origin", ["https://relay.example.com/path", "null", "https://a:b@host"])
+def test_invalid_public_origin_fails_at_startup(origin):
+    with pytest.raises(ValueError, match="RELAY_ADMIN_ORIGIN"):
+        admin_auth.AdminAuth(PASSWORD, public_origin=origin)
+
+
+def test_origin_default_port_normalization(client):
+    response = client.post(
+        "/api/admin/login", json={"password": PASSWORD}, headers={"Origin": "http://testserver:80"}
+    )
+    assert response.status_code == 200
+    for origin in ("http://testserver:0", "http://testserver:8000"):
+        assert client.post(
+            "/api/admin/login", json={"password": PASSWORD}, headers={"Origin": origin}
+        ).status_code == 403
+
+
 def test_wrong_password_rate_limit_and_forwarded_headers_cannot_bypass(client):
     for attempt in range(5):
         response = client.post(

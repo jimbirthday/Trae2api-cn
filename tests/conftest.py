@@ -73,6 +73,7 @@ os.environ.update(
         "RELAY_ADMIN_PASSWORD": "isolated-test-admin-password",
         "RELAY_ADMIN_PASSWORD_FILE": "",
         "RELAY_ADMIN_COOKIE_SECURE": "0",
+        "RELAY_ADMIN_ORIGIN": "",
         "TRAE_USAGE_RECORDS_PATH": str(_TEST_USAGE),
         "TRAE_USAGE_STATS_PATH": str(_TEST_USAGE_STATS),
     }
