@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
+import math
 from datetime import UTC, datetime
 
 import anyio
@@ -16,7 +20,7 @@ MAX_ACCOUNTS = 1000
 FORMAT = "trae-cn-relay-accounts"
 FIELDS = {
     "user_id": ("user_id", "userId", "web_id", "webId"),
-    "label": ("label", "screen_name", "screenName"),
+    "label": ("label", "name", "screen_name", "screenName"),
     "token": ("token", "Token"),
     "refresh_token": ("refresh_token", "refreshToken", "RefreshToken"),
     "expired_at": ("expired_at", "expiredAt"),
@@ -26,6 +30,36 @@ FIELDS = {
     "source": ("source",),
     "edition": ("edition",),
 }
+
+
+def _jwt_metadata(token: str) -> dict:
+    """Read optional identity hints only; upstream still authenticates the JWT.
+
+    Imported JWTs are not signature-verified here. Never use their claims to
+    authorize administrator access or replace the supplied refresh credential.
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        return {}
+    try:
+        encoded = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.b64decode(encoded, altchars=b"-_", validate=True))
+    except (ValueError, UnicodeDecodeError, binascii.Error, RecursionError):
+        return {}
+    if not isinstance(claims, dict):
+        return {}
+    data = claims.get("data")
+    data = data if isinstance(data, dict) else {}
+    result = {}
+    for field, value in (("user_id", data.get("id")), ("tenantId", data.get("tenant_id"))):
+        if type(value) is int:
+            value = str(value)
+        if isinstance(value, str) and 0 < len(value) <= 512 and all(ord(c) >= 32 for c in value):
+            result[field] = value
+    expires = claims.get("exp")
+    if type(expires) in {int, float} and 0 < expires < 1e12 and math.isfinite(expires):
+        result["expired_at"] = str(expires)
+    return result
 
 
 def normalize_accounts(document: object) -> list[tuple[str, dict]]:
@@ -66,7 +100,15 @@ def normalize_accounts(document: object) -> list[tuple[str, dict]]:
             record[field] = value
         if not record["token"].strip():
             raise invalid("缺少 token，不能导入不含凭据的账号列表")
-        account_id = record["user_id"] or row.get("id") or key or record["token"][:24]
+        metadata = _jwt_metadata(record["token"])
+        # Native backup IDs take precedence; JWT headers are shared by many
+        # accounts, so a token prefix is never a suitable fallback identifier.
+        if not record["user_id"] and not row.get("id") and not key:
+            record["user_id"] = metadata.get("user_id", "")
+        if not record["expired_at"]:
+            record["expired_at"] = metadata.get("expired_at", "")
+        fingerprint = hashlib.sha256(record["token"].encode()).hexdigest()
+        account_id = record["user_id"] or row.get("id") or key or "token-" + fingerprint
         if (
             not isinstance(account_id, str)
             or not account_id.strip()
@@ -77,6 +119,15 @@ def normalize_accounts(document: object) -> list[tuple[str, dict]]:
         provider = row.get("provider_specific", {})
         if not isinstance(provider, dict):
             raise invalid("provider_specific 必须是 JSON 对象")
+        provider = dict(provider)
+        for field in ("deviceId", "machineId"):
+            value = row.get(field, "")
+            if not isinstance(value, str) or len(value) > 512:
+                raise invalid(f"{field} 字段类型或长度无效")
+            if value and not provider.get(field):
+                provider[field] = value
+        if metadata.get("tenantId") and not provider.get("tenantId"):
+            provider["tenantId"] = metadata["tenantId"]
         if any(
             isinstance(value, str) and any(ord(char) < 32 for char in value)
             for value in provider.values()
@@ -84,7 +135,7 @@ def normalize_accounts(document: object) -> list[tuple[str, dict]]:
             raise invalid("provider_specific 不能包含控制字符")
         if record["source"] not in {"", "web-login", "auto", "env", "manual", "cli"}:
             raise invalid("不支持的凭据来源 source")
-        enabled = row.get("model_enabled", True)
+        enabled = row.get("model_enabled", row.get("enabled", True))
         if not isinstance(enabled, bool):
             raise invalid("model_enabled 必须是布尔值")
         record.update(

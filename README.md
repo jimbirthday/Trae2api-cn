@@ -326,6 +326,14 @@ curl -X POST http://127.0.0.1:8000/api/accounts/model-enabled \
 ]
 ```
 
+也支持 `{"accounts":[{"name":"账号名称","token":"JWT","refreshToken":"刷新凭据",
+"enabled":true,"deviceId":"","machineId":"","cookies":[]}]}` 格式：
+`name` 映射为账号名称，`enabled` 映射为新账号的模型请求开关，设备字段存入授权元数据。
+缺少账号 ID 和过期时间时，尝试从 JWT 的 `data.id` 和 `exp` 提取；这里只读取元数据，
+不代表凭据已通过上游验证。无法提取 ID 时用完整 Token 的 SHA-256 区分账号，
+不会因为多个 JWT 头部相同而合并。浏览器 `cookies` 不参与本项目的 Token 认证，
+导入时忽略，也不会随本项目备份再次导出。
+
 每次最多 1000 个账号、5 MiB；文件内重复账号只处理第一次出现的记录。
 Nginx 反向代理如需上传较大的文件，请在对应的 `server` 或 `location` 中设置
 `client_max_body_size 6m;` 并重新加载 Nginx，避免其默认上传限制先行拒绝请求。

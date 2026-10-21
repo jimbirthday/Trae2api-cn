@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import json
 from unittest.mock import Mock
@@ -117,6 +118,77 @@ def test_legacy_store_and_camel_case_fields(client):
     assert auth._poll_enabled is True
 
 
+def jwt(claims):
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9." + payload + ".synthetic-signature"
+
+
+def test_external_account_pool_format_and_reimport(client):
+    def external(user_id, enabled):
+        return {
+            "name": "账号 " + user_id,
+            "token": jwt({"data": {"id": user_id, "tenant_id": "synthetic-tenant"}, "exp": 2000000000}),
+            "refreshToken": "synthetic-refresh-" + user_id,
+            "deviceId": "synthetic-device",
+            "machineId": "synthetic-machine",
+            "enabled": enabled,
+            "cookies": [{"name": "sessionid", "value": "synthetic-cookie-secret"}],
+        }
+
+    payload = {"accounts": [external("101", False), external("102", True)]}
+    result = client.post("/api/accounts/import", json=payload)
+    assert result.json()["added"] == 2
+    saved = auth.get_account_record("101")
+    assert saved["user_id"] == "101"
+    assert saved["label"] == "账号 101"
+    assert saved["model_enabled"] is False
+    assert saved["refresh_token"] == "synthetic-refresh-101"
+    assert saved["expired_at"] == "2000000000"
+    assert saved["provider_specific"] == {
+        "deviceId": "synthetic-device", "machineId": "synthetic-machine", "tenantId": "synthetic-tenant"
+    }
+    assert "cookies" not in saved
+    exported = client.post("/api/accounts/export")
+    assert "synthetic-cookie-secret" not in exported.text
+    assert len(exported.json()["accounts"]) == 2
+    payload["accounts"][0]["token"] = jwt({"data": {"id": "101"}, "exp": 2100000000})
+    assert client.post("/api/accounts/import", json=payload).json()["skipped"] == 2
+    assert client.post(
+        "/api/accounts/import", json={"data": payload, "update_existing": True}
+    ).json()["updated"] == 2
+    assert len(auth._accounts) == 2
+    assert auth.get_account_record("101")["expired_at"] == "2100000000"
+
+
+def test_shared_token_prefix_uses_distinct_fingerprints_without_jwt_id(client):
+    tokens = [jwt({"sub": "one"}), jwt({"sub": "two"})]
+    assert tokens[0][:24] == tokens[1][:24]
+    rows = [{"token": token} for token in tokens]
+    assert client.post("/api/accounts/import", json=rows).json()["added"] == 2
+    assert client.post("/api/accounts/import", json=rows).json()["skipped"] == 2
+    assert all(key.startswith("token-") for key in auth._accounts)
+
+
+def test_explicit_backup_identity_and_preferences_override_jwt_metadata(client):
+    row = record(
+        token=jwt({"data": {"id": "jwt-user", "tenant_id": "jwt-tenant"}, "exp": 1000}),
+        name="Ignored name", enabled=True, provider_specific={"tenantId": "explicit-tenant"},
+    )
+    assert client.post("/api/accounts/import", json=[row]).status_code == 200
+    saved = auth.get_account_record("user-1")
+    assert saved["label"] == row["label"]
+    assert saved["expired_at"] == row["expired_at"]
+    assert saved["model_enabled"] is False
+    assert saved["provider_specific"]["tenantId"] == "explicit-tenant"
+
+
+@pytest.mark.parametrize("claims", [None, [], {"data": []}, {"exp": 10**100}, {"exp": "later"}])
+def test_jwt_metadata_is_optional_and_tolerates_invalid_claim_shapes(claims):
+    rows = account_transfer.normalize_accounts([{"token": jwt(claims)}])
+    assert len(rows) == 1
+    assert rows[0][0].startswith("token-")
+
+
 @pytest.mark.parametrize(
     "invalid",
     [
@@ -126,6 +198,8 @@ def test_legacy_store_and_camel_case_fields(client):
         [record(token="synthetic\nRELAY_ADMIN_PASSWORD=injected")],
         [record(provider_specific={"webId": "synthetic\nRELAY_ADMIN_PASSWORD=injected"})],
         [record(source="unsupported-source")],
+        [{"token": "synthetic", "enabled": "false"}],
+        [{"token": "synthetic", "deviceId": "bad\nvalue"}],
         {"accounts": [record()], "version": 2},
         {"data": [record()], "update_existing": "yes"},
     ],
