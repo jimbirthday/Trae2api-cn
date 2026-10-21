@@ -55,6 +55,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from . import (
+    account_transfer,
     admin_auth,
     anthropic_api,
     auth,
@@ -1444,6 +1445,14 @@ a { color: var(--accent); }
 .manual-add { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
 .manual-add summary { font-size: 13px; color: var(--muted); cursor: pointer; font-weight: 550; }
 .manual-add summary:hover { color: var(--accent); }
+.account-transfer { margin: 14px 0; }
+.account-transfer summary, .account-transfer .inline-check { min-height: 44px; align-content: center; }
+.account-transfer .btn, .account-transfer input[type=file] { min-height: 44px; height: auto; }
+.account-transfer input[type=file] { padding: 8px; }
+.account-transfer .inline-check { height: auto; padding: 10px; white-space: normal; }
+.account-transfer .inline-check:active { transform: none; }
+.account-transfer .inline-check:has(input:checked) { animation: none; }
+.account-transfer .inline-check input { flex-shrink: 0; }
 .manual-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0 12px; margin-top: 12px; }
 .manual-grid .span-all { grid-column: 1 / -1; }
 .manual-submit { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
@@ -1701,6 +1710,7 @@ def _web_login_html(csrf_token: str = "") -> str:
         active_row = "active-row" if acc.get("is_active") else ""
         switch_disabled = " disabled" if acc.get("is_active") else ""
         aid = html_mod.escape(acc.get("id") or "")
+        aid_js = html_mod.escape(json.dumps(acc.get("id") or ""))
         model_enabled = bool(acc.get("model_enabled", True))
         model_checked = " checked" if model_enabled else ""
         model_badge = (
@@ -1738,11 +1748,11 @@ def _web_login_html(csrf_token: str = "") -> str:
           <td class="muted-cell">{expires}</td>
           <td class="numeric"><span id="general-credits-{aid}" class="credit-value">{credits_text}</span></td>
           <td><span id="checkin-{aid}" class="checkin-state">{checkin_badge}</span><small id="checkin-detail-{aid}" class="row-subtitle"></small></td>
-          <td class="model-toggle-cell"><div id="model-state-wrap-{aid}" class="model-toggle-state">{model_badge}</div><label class="switch account-model-switch" title="仅控制模型请求，不影响签到"><input type="checkbox" data-action="model-toggle" onchange="markAccountModelDirty('{aid}', this)" aria-label="启用账号模型请求"{model_checked}><span class="track"></span></label></td>
+          <td class="model-toggle-cell"><div id="model-state-wrap-{aid}" class="model-toggle-state">{model_badge}</div><label class="switch account-model-switch" title="仅控制模型请求，不影响签到"><input type="checkbox" data-action="model-toggle" onchange="markAccountModelDirty({aid_js}, this)" aria-label="启用账号模型请求"{model_checked}><span class="track"></span></label></td>
           <td class="row-actions">
-            <button class="icon-btn" data-action="checkin" onclick="checkinAccount('{aid}')" title="签到" aria-label="签到">{ic['calendar-check']}</button>
-            <button class="icon-btn" data-action="switch-account" onclick="switchAccount('{aid}')" title="切换为当前账号" aria-label="切换为当前账号"{switch_disabled}>{ic['arrow-left-right']}</button>
-            <button class="icon-btn danger" onclick="removeAccount('{aid}')" title="删除账号" aria-label="删除账号">{ic['trash-2']}</button>
+            <button class="icon-btn" data-action="checkin" onclick="checkinAccount({aid_js})" title="签到" aria-label="签到">{ic['calendar-check']}</button>
+            <button class="icon-btn" data-action="switch-account" onclick="switchAccount({aid_js})" title="切换为当前账号" aria-label="切换为当前账号"{switch_disabled}>{ic['arrow-left-right']}</button>
+            <button class="icon-btn danger" onclick="removeAccount({aid_js})" title="删除账号" aria-label="删除账号">{ic['trash-2']}</button>
           </td>
         </tr>"""
     if accounts:
@@ -2050,6 +2060,24 @@ def _web_login_html(csrf_token: str = "") -> str:
     </div>
   </div>
   {accounts_html}
+  <details class="manual-add account-transfer" id="account-transfer">
+    <summary>批量导入 / 导出账号</summary>
+    <p class="field-note" id="account-transfer-hint">支持本项目导出的 JSON、data/accounts.json 或账号数组。最多 1000 个账号、5 MiB；文件包含登录凭据，请妥善保管。</p>
+    <form id="account-import-form" class="manual-grid" onsubmit="importAccounts(event)">
+      <div class="form-group span-all">
+        <label for="account-import-file">选择账号 JSON 文件</label>
+        <input id="account-import-file" type="file" accept=".json,application/json" onchange="readAccountImportFile()" aria-describedby="account-transfer-hint account-import-preview">
+        <p class="field-note" id="account-import-preview" role="status" aria-live="polite">尚未选择文件</p>
+      </div>
+      <label class="inline-check span-all"><input id="account-import-update" type="checkbox">更新已有账号凭据（默认跳过；保留已有模型开关和签到记录）</label>
+      <div class="span-all btn-group">
+        <button class="btn btn-primary" type="submit" id="account-import-btn" disabled>开始导入</button>
+        <button class="btn btn-secondary" type="button" id="account-export-btn" onclick="exportAccounts()"{' disabled' if not accounts else ''}>{ic['download']}导出全部账号</button>
+        <button class="btn btn-secondary" type="button" id="account-import-refresh" onclick="location.reload()" hidden>刷新账号列表</button>
+      </div>
+    </form>
+    <div id="account-transfer-msg" class="msg" role="status" aria-live="polite"></div>
+  </details>
   <div class="account-msgs">
     <div id="account-msg" class="msg" role="status" aria-live="polite"></div>
     <div id="checkin-msg" class="msg" role="status" aria-live="polite"></div>
@@ -3743,6 +3771,78 @@ async function removeAccount(id){{
   var d=await postJSON('/api/accounts/remove',{{account_id:id}});
   if(d.success) location.reload(); else showMsg('auth-msg',d.error||'删除失败',false);
 }}
+let accountImportDocument=null;
+let accountImportSerial=0;
+async function readAccountImportFile(){{
+  var serial=++accountImportSerial;
+  var input=document.getElementById('account-import-file'),file=input.files[0];
+  var button=document.getElementById('account-import-btn'),preview=document.getElementById('account-import-preview');
+  accountImportDocument=null;button.disabled=true;input.removeAttribute('aria-invalid');
+  showMsg('account-transfer-msg','',true);
+  if(!file){{ preview.textContent='尚未选择文件';return; }}
+  preview.textContent='正在读取文件…';
+  try{{
+    if(file.size>5*1024*1024) throw new Error('文件过大，最多 5 MiB');
+    var data=JSON.parse((await file.text()).replace(/^\\uFEFF/,''));
+    if(serial!==accountImportSerial) return;
+    var rows=Array.isArray(data)?data:(data&&data.accounts);
+    var count=Array.isArray(rows)?rows.length:(rows&&typeof rows==='object'?Object.keys(rows).length:0);
+    if(!count||count>1000) throw new Error('文件需包含 1–1000 个账号；支持账号数组或 accounts 对象');
+    accountImportDocument=data;button.disabled=false;
+    preview.textContent='已读取 '+count+' 个账号，点击“开始导入”保存。';
+  }}catch(e){{
+    if(serial!==accountImportSerial) return;
+    preview.textContent='无法导入该文件';input.setAttribute('aria-invalid','true');
+    showMsg('account-transfer-msg',e instanceof SyntaxError?'文件不是有效的 JSON':e.message,false,0);
+  }}
+}}
+async function importAccounts(event){{
+  event.preventDefault();if(!accountImportDocument) return;
+  var button=document.getElementById('account-import-btn'),input=document.getElementById('account-import-file');
+  var update=document.getElementById('account-import-update');
+  button.disabled=true;input.disabled=true;update.disabled=true;button.textContent='正在导入…';
+  try{{
+    var data=await postJSON('/api/accounts/import',{{data:accountImportDocument,update_existing:update.checked}},60000);
+    if(!data.success){{ showMsg('account-transfer-msg',data.error||'导入失败',false,0);return; }}
+    var message='导入完成：新增 '+data.added+' 个，更新 '+data.updated+' 个，跳过 '+data.skipped+' 个。';
+    accountImportDocument=null;input.value='';++accountImportSerial;
+    document.getElementById('account-import-preview').textContent='尚未选择文件';
+    showMsg('account-transfer-msg',message,true,0);
+    document.getElementById('account-import-refresh').hidden=false;
+    try{{
+      sessionStorage.setItem('relay-account-import-result',message);
+      location.reload();
+    }}catch(e){{ /* The refresh button remains available when storage is disabled. */ }}
+  }}finally{{
+    button.disabled=!accountImportDocument;input.disabled=false;update.disabled=false;button.textContent='开始导入';
+  }}
+}}
+async function exportAccounts(){{
+  if(!confirm('导出文件包含全部账号的 Token 和刷新凭据。请仅保存在可信位置，是否继续？')) return;
+  var button=document.getElementById('account-export-btn');button.disabled=true;button.textContent='正在导出…';
+  try{{
+    var response=await fetch('/api/accounts/export',{{method:'POST',cache:'no-store'}});
+    if(!response.ok){{
+      var data=await response.json();throw new Error(data.error||'导出失败');
+    }}
+    var blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement('a');
+    var name=(response.headers.get('Content-Disposition')||'').match(/filename="([^"]+)"/);
+    link.href=url;link.download=name?name[1]:'trae-accounts.json';document.body.appendChild(link);link.click();link.remove();
+    setTimeout(function(){{ URL.revokeObjectURL(url); }},1000);
+    showMsg('account-transfer-msg','账号文件已导出，请妥善保管其中的登录凭据。',true,0);
+  }}catch(e){{ showMsg('account-transfer-msg',e.message||'导出失败',false,0); }}
+  finally{{ button.disabled=false;button.textContent='导出全部账号'; }}
+}}
+(function(){{
+  try{{
+    var message=sessionStorage.getItem('relay-account-import-result');
+    if(message){{
+      sessionStorage.removeItem('relay-account-import-result');
+      document.getElementById('account-transfer').open=true;
+      showMsg('account-transfer-msg',message,true,0);
+    }}
+  }}catch(e){{}}
+}})();
 function markPollingDirty(){{
   var btn=document.getElementById('poll-save-btn');
   if(btn) btn.disabled=false;
@@ -12337,6 +12437,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Trae CN Relay", version=APP_VERSION, lifespan=lifespan)
 admin_auth.install(app, admin_auth.AdminAuth.from_env())
+account_transfer.install(app)
 
 
 @app.exception_handler(_ModelAccountUnavailable)

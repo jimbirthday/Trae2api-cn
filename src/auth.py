@@ -9,10 +9,12 @@ auth.py - 认证管理
 """
 
 import base64
+import copy
 import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -1380,6 +1382,71 @@ def add_account(creds: dict, label: str = '') -> str:
         _save_accounts()
     _save_env_snapshot()
     return aid
+
+
+def import_account_records(records: list[tuple[str, dict]], update_existing: bool = False) -> dict:
+    """Merge a validated batch; publish it only after an atomic disk write.
+
+    Duplicate imports never change active selection, polling or existing
+    model switches/check-in metadata. The first occurrence in a file wins.
+    """
+    global _accounts, _active_account
+    counts = {'added': 0, 'updated': 0, 'skipped': 0, 'total': len(records)}
+    switched = False
+    with _STORE_LOCK:
+        staged = dict(_accounts)
+        seen: set[str] = set()
+        changed: set[str] = set()
+        for account_id, incoming in records:
+            if account_id in seen or (account_id in staged and not update_existing):
+                counts['skipped'] += 1
+                continue
+            seen.add(account_id)
+            previous = staged.get(account_id)
+            record = dict(previous or {})
+            record.update(copy.deepcopy(incoming))
+            if previous is not None:
+                record['model_enabled'] = _record_model_enabled(previous)
+            staged[account_id] = record
+            changed.add(account_id)
+            counts['updated' if previous is not None else 'added'] += 1
+        if not changed:
+            return counts
+        active = _active_account if _active_account in staged else next(
+            (aid for aid, rec in staged.items() if _record_model_eligible(rec)),
+            next(iter(staged)),
+        )
+        data = {
+            'accounts': staged,
+            'active': active,
+            'poll_enabled': _poll_enabled,
+            'polling_mode': _polling_mode,
+            'rotation_cursor': _rotation_cursor,
+            'settings': _settings,
+        }
+        ACCOUNTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode='w', encoding='utf-8', dir=ACCOUNTS_PATH.parent,
+                prefix='.accounts-', suffix='.tmp', delete=False,
+            ) as stream:
+                temporary = Path(stream.name)
+                json.dump(data, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, ACCOUNTS_PATH)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        switched = active != _active_account or active in changed
+        _accounts = staged
+        _active_account = active
+        if switched:
+            _switch_record(staged[active])
+    if switched:
+        _save_env_snapshot()
+    return counts
 
 
 def remove_account(account_id: str) -> bool:
