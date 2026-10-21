@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
-from fastapi.testclient import TestClient
+from tests.admin_client import TestClient
 
 # Keep importing this module from changing the process-wide default expected by
 # the existing smoke suite. Individual replay cases opt into raw mode locally.

@@ -67,9 +67,12 @@ os.environ.update(
         "TRAE_CLI_PROMPT_MODE": "stdin",
         "TRAE_CLI_OUTPUT_MODE": "json",
         "TRAE_CLI_DISABLE_TOOLS": "false",
-        # Keep the default test app unprotected.  Suites that exercise API-key
+        # Keep model APIs unprotected by default. Suites that exercise API-key
         # enforcement patch ``main.API_KEYS`` directly.
         "RELAY_API_KEYS": "",
+        "RELAY_ADMIN_PASSWORD": "isolated-test-admin-password",
+        "RELAY_ADMIN_PASSWORD_FILE": "",
+        "RELAY_ADMIN_COOKIE_SECURE": "0",
         "TRAE_USAGE_RECORDS_PATH": str(_TEST_USAGE),
         "TRAE_USAGE_STATS_PATH": str(_TEST_USAGE_STATS),
     }

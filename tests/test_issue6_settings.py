@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fastapi.testclient import TestClient
+from tests.admin_client import TestClient
 from fastapi.responses import JSONResponse
 
 from src import auth

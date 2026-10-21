@@ -22,7 +22,6 @@ import re
 import sys
 import urllib.parse
 import urllib.request
-import uuid
 import webbrowser
 from pathlib import Path
 
@@ -237,12 +236,14 @@ def exchange_refresh_token(refresh_token: str, client_id: str, host: str = "") -
     }
 
 
-def forward_to_relay(relay_url: str, creds: dict) -> tuple[bool, str]:
+def forward_to_relay(relay_url: str, creds: dict, import_token: str = "") -> tuple[bool, str]:
     """POST 凭证到 relay /api/web-auth，返回 (success, message)"""
     url = relay_url.rstrip("/") + "/api/web-auth"
     data = json.dumps(creds).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
+    if import_token:
+        req.add_header("X-Relay-Import-Token", import_token)
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             body = resp.read().decode("utf-8")
@@ -296,64 +297,14 @@ code {{background:#252836;padding:1px 6px;border-radius:4px;font-size:12px}}
 <body><div class="panel">{content}</div></body></html>"""
 
     def _index_page(self) -> str:
-        port = self.server.server_address[1]
-        relay = self.relay_url
-        client_id_js = json.dumps(self.client_id, ensure_ascii=False).replace("<", "\\u003c")
-        auth_url_js = json.dumps(self.auth_url, ensure_ascii=False).replace("<", "\\u003c")
+        # Account import grants must originate in an authenticated console.
+        # The helper's local landing page carries no administrator secrets.
         return self._html(f"""
-<h1>Trae CN Relay 授权</h1>
-<p>
-  监听端口: <code>{port}</code><br>
-  中转站: <code>{relay}</code>
-</p>
-<p>
-  1. 确保浏览器已登录 <a href="https://www.trae.cn" target="_blank" rel="noopener" style="color:#8ab4f8">trae.cn</a><br>
-  2. 点击下方按钮
-</p>
-<div class="btn-group">
-  <button class="btn btn-primary" onclick="startAuth()" id="auth-btn">使用 Trae 网页授权登录</button>
-  <a class="btn btn-ghost" href="https://www.trae.cn" target="_blank" rel="noopener">打开 trae.cn</a>
-</div>
-<div id="loading" class="loading">等待授权中…</div>
-<div id="auth-msg" class="msg"></div>
-<script>
-var state = {{ traceId: null, win: null }};
-function uuid(){{return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,function(c){{var r=Math.random()*16|0;return(c==='x'?r:(r&3|8)).toString(16)}})}}
-function randomHex(n){{var a=new Uint8Array(n);crypto.getRandomValues(a);return Array.from(a,b=>b.toString(16).padStart(2,'0')).join('')}}
-function randomDigits(n){{var s='';while(s.length<n)s+=Math.floor(Math.random()*1e10).toString();return s.slice(0,n)}}
-function buildAuthUrl(){{
-  var cb = 'http://127.0.0.1:{port}/authorize';
-  var mid = randomHex(32), did = randomDigits(19), tid = state.traceId;
-  var p = new URLSearchParams({{
-    login_version:'1',auth_from:'solo',login_channel:'native_ide',plugin_version:'2.3.24254',
-    auth_type:'local',client_id:{client_id_js},redirect:'0',login_trace_id:tid,
-    auth_callback_url:cb,machine_id:mid,device_id:did,x_device_id:did,x_machine_id:mid,
-    x_device_brand:'Mac14,7',x_device_type:'mac',x_os_version:'macOS 26.4.1',x_env:'',
-    x_app_version:'0.1.7',x_app_type:'stable',hide_saas_login:'true'
-  }});
-  return {auth_url_js}+'?'+p.toString();
-}}
-function startAuth(){{
-  state.traceId = uuid();
-  var url = buildAuthUrl();
-  var w = window.open(url, 'trae-relay-oauth', 'width=560,height=760');
-  if (!w){{ showMsg('auth-msg','弹出窗口被拦截',false); return; }}
-  state.win = w;
-  document.getElementById('loading').style.display='block';
-  document.getElementById('auth-btn').disabled=true;
-  var poll = setInterval(function(){{ if(w.closed){{ clearInterval(poll);document.getElementById('loading').style.display='none';document.getElementById('auth-btn').disabled=false; }} }},700);
-}}
-window.addEventListener('message',function(ev){{
-  if (!ev.data||ev.data.type!=='trae-relay-web-login') return;
-  if (state.traceId&&ev.data.loginTraceId!==state.traceId) return;
-  if (ev.data.success){{ showMsg('auth-msg','授权成功',true); }}
-  else{{ showMsg('auth-msg',ev.data.error||'授权失败',false); }}
-  document.getElementById('loading').style.display='none';
-  document.getElementById('auth-btn').disabled=false;
-  if (state.win&&!state.win.closed) state.win.close();
-}});
-function showMsg(id,text,ok){{ var el=document.getElementById(id);el.textContent=text;el.className='msg'+(ok?' msg-ok':' msg-err'); }}
-</script>""")
+<h1>本机授权助手已就绪</h1>
+<p>请在中转站控制台登录管理员后，点击「使用 Trae 网页授权登录」。</p>
+<p>本机监听端口：<code>{self.server.server_address[1]}</code></p>
+<a class="btn btn-primary" href="{self.relay_url}/web/login" target="_blank" rel="noopener">打开管理控制台</a>
+""")
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -400,8 +351,9 @@ function showMsg(id,text,ok){{ var el=document.getElementById(id);el.textContent
             self._send_html(html)
             return
 
-        # 转发到 relay
-        success, msg = forward_to_relay(self.relay_url, creds)
+        # The console issues a short-lived, one-use trace ID scoped to account
+        # import. Never copy an administrator password or cookie into helpers.
+        success, msg = forward_to_relay(self.relay_url, creds, import_token=trace_id)
         html = self._oauth_result_page(success, msg, trace_id)
         self._send_html(html)
 
@@ -409,6 +361,8 @@ function showMsg(id,text,ok){{ var el=document.getElementById(id);el.textContent
         safe_msg = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
         js_message = json.dumps(message, ensure_ascii=False).replace("<", "\\u003c")
         js_trace = json.dumps(login_trace_id, ensure_ascii=False).replace("<", "\\u003c")
+        relay = urllib.parse.urlsplit(self.relay_url)
+        js_origin = json.dumps(f"{relay.scheme}://{relay.netloc}")
         return self._html(f"""
 <div class="msg {'msg-ok' if success else 'msg-err'}">
   <h2 style="margin:0 0 8px;font-size:16px">{"成功" if success else "失败"}</h2>
@@ -420,7 +374,7 @@ function showMsg(id,text,ok){{ var el=document.getElementById(id);el.textContent
     if (!window.opener) return;
     var msg = {{ type:'trae-relay-web-login', success:{"true" if success else "false"}, error:null, loginTraceId:{js_trace} }};
     if (!{str(success).lower()}) msg.error = {js_message};
-    window.opener.postMessage(msg, '*');
+    window.opener.postMessage(msg, {js_origin});
   }} catch(e){{}}
   setTimeout(function(){{ window.close(); }}, {800 if success else 4000});
 }})();

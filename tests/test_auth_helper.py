@@ -11,7 +11,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.admin_client import TestClient
 
 from src import auth_helper
 from src.auth_helper import RelayURLError

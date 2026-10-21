@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.testclient import TestClient
+from tests.admin_client import TestClient
 
 from src import main as main_module
 from src.main import app

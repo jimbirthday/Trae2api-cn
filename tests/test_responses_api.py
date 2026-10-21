@@ -13,7 +13,7 @@ os.environ.setdefault("TRAE_AUTH_SOURCE", "cli")
 os.environ.setdefault("UPSTREAM_MODE", "cli")
 os.environ.setdefault("TRAE_CLI_COMMAND", FAKE_CMD)
 
-from fastapi.testclient import TestClient
+from tests.admin_client import TestClient
 
 from src import main, responses_api
 from src.cli_client import CliEvent

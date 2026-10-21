@@ -23,7 +23,6 @@ import codecs
 import gzip
 import hashlib
 import html as html_mod
-import ipaddress
 import json
 import logging
 import os
@@ -56,11 +55,13 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from . import (
+    admin_auth,
     anthropic_api,
     auth,
     cli_client,
     continuation,
     images,
+    oauth_callback as oauth_callback_parser,
     raw_client,
     responses_api,
     trae_client,
@@ -600,47 +601,10 @@ TRAE_AUTH_URL = os.environ.get("TRAE_AUTH_URL", "https://www.trae.cn/authorizati
 TRAE_CLIENT_ID = os.environ.get("TRAE_CLIENT_ID") or "ono9krqynydwx5"
 LOCAL_LISTENER_PORT = int(os.environ.get("WEB_LOGIN_LISTENER_PORT", "8765"))
 PUBLIC_PATHS = {
-    "/healthz",
-    "/favicon.svg",
-    "/favicon.ico",
-    "/v1/status",
-    "/v1/models",
-    "/models",
-    "/web/login",
-    "/web/login/download",
-    "/web/login/helper-info",
-    "/authorize",
-    "/api/web-auth",
-    "/api/logout",
-    "/api/accounts",
-    "/api/accounts/switch",
-    "/api/accounts/remove",
-    "/api/settings",
-    "/api/polling",
-    "/api/polling-mode",
-    "/api/max-mode",
-    "/api/max-mode/models",
-    "/api/auto-route",
-    "/api/auto-checkin",
-    "/api/auto-checkin/run",
-    "/api/checkin/status",
-    "/api/checkin/claim",
-    "/api/checkin/accounts",
-    "/api/checkin/claim-all",
-    "/api/checkin/claim-credits",
-    "/api/checkin/account",
-    "/api/checkin/work-credits",
-    "/api/usage/last",
-    "/api/usage/records",
-    "/api/overview",
-    # TraeWork custom-model management probes cannot reliably attach the
-    # relay API key before the model has been saved. Chat ingress remains
-    # protected by the normal middleware; only connectivity is public.
+    "/healthz", "/favicon.svg", "/favicon.ico", "/v1/models", "/models",
     "/api/agent/v3/custom_model_connectivity_check",
-    "/api/ide/v1/custom_model_connectivity_check",
-    "/v1/custom_model/connectivity",
+    "/api/ide/v1/custom_model_connectivity_check", "/v1/custom_model/connectivity",
 }
-PUBLIC_PATH_PREFIXES = ("/api/checkin", "/api/accounts")
 WEB_LOGIN_SCRIPT = Path(__file__).resolve().parent.parent / "web_login.py"
 
 
@@ -1667,7 +1631,7 @@ def _status_badge() -> str:
     return '<span class="badge badge-none">\u672a\u767b\u5f55</span>'
 
 
-def _web_login_html() -> str:
+def _web_login_html(csrf_token: str = "") -> str:
     s = auth.get_auth()
     client_id = TRAE_CLIENT_ID
     listener_port = LOCAL_LISTENER_PORT
@@ -1803,7 +1767,7 @@ def _web_login_html() -> str:
 
     logout_btn = ''
     if state.token:
-        logout_btn = f'<button class="icon-btn" onclick="logout()" title="登出" aria-label="登出">{ic["log-out"]}</button>'
+        logout_btn = f'<button class="icon-btn" onclick="logout()" title="退出 Trae 账号" aria-label="退出 Trae 账号">{ic["log-out"]}</button>'
 
     settings_web = (settings.get("web_base_url") or WEB_BASE).rstrip("/")
     settings_model_base = str(settings.get("model_base_url") or "").rstrip("/")
@@ -1954,6 +1918,7 @@ def _web_login_html() -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>Trae CN Relay 控制台</title>
+<meta name="admin-csrf" content="{html_mod.escape(csrf_token)}">
 {_FAVICON_LINKS}
 <script>
 (function(){{
@@ -2000,6 +1965,7 @@ def _web_login_html() -> str:
       <span class="theme-icon theme-moon">{ic['moon']}</span>
     </label>
     {logout_btn}
+    <button class="btn btn-secondary btn-sm" onclick="adminLogout()">退出管理</button>
   </div>
 </header>
 <div class="content">
@@ -2093,19 +2059,37 @@ def _web_login_html() -> str:
 <section class="panel-card" aria-labelledby="login-title">
   <div class="section-head"><div class="section-title" id="login-title">授权登录</div></div>
   <ol class="login-steps">
-    <li>点击授权登录，自动检测本机授权助手（<code>127.0.0.1:{listener_port}</code>）。</li>
-    <li>未检测到时，下载 <code>web_login.py</code> 或本机一键脚本（Windows <code>start_auth.bat</code> / macOS·Linux <code>start_auth.sh</code>）在<b>本机</b>运行后重试。</li>
-    <li>浏览器需已登录 <a href="https://www.trae.cn" target="_blank" rel="noopener">trae.cn</a>，授权完成后凭据自动写入服务器。</li>
+    <li>点击下方按钮，在 Trae 网页完成授权，无需在电脑或服务器运行额外脚本。</li>
+    <li>授权后会跳转至 <code>127.0.0.1:{listener_port}/authorize</code>；显示「无法访问」属于正常情况。</li>
+    <li>复制该页面地址栏中的<b>完整地址</b>，粘贴到下方导入。请在 10 分钟内完成。</li>
   </ol>
   <div class="btn-group">
     <button class="btn btn-primary" onclick="startAuth()" id="auth-btn">{ic['log-in']}使用 Trae 网页授权登录</button>
-    <a class="btn btn-secondary" href="/web/login/download?as=py" download id="helper-py-link">{ic['download']}授权助手 web_login.py</a>
-    <a class="btn btn-secondary" href="/web/login/download?as=bat" download id="bat-link">{ic['download']}start_auth.bat</a>
-    <a class="btn btn-secondary" href="/web/login/download?as=sh" download id="sh-link">{ic['download']}start_auth.sh</a>
     <a class="icon-btn" href="https://www.trae.cn" target="_blank" rel="noopener" title="访问 trae.cn" aria-label="访问 trae.cn">{ic['external-link']}</a>
   </div>
-  <div id="loading" class="loading">等待授权中...</div>
-  <div id="auth-msg" class="msg"></div>
+  <div id="loading" class="loading">请完成授权，复制回调页面的完整地址并在下方导入。</div>
+  <div id="auth-msg" class="msg" role="status" aria-live="polite"></div>
+  <form id="callback-form" class="manual-grid">
+    <div class="form-group span-all">
+      <label for="callback-url">授权回调地址</label>
+      <textarea id="callback-url" name="callback_url" required spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="callback-hint" placeholder="http://127.0.0.1:{listener_port}/authorize?..."></textarea>
+      <p id="callback-hint" class="field-note">粘贴浏览器地址栏的完整地址，无需打开该地址。导入成功后输入内容会自动清除。</p>
+    </div>
+    <div class="span-all manual-submit">
+      <button type="submit" id="callback-submit" class="btn btn-primary btn-sm">导入授权账号</button>
+      <div id="callback-msg" class="msg" role="status" aria-live="polite"></div>
+    </div>
+  </form>
+  <details class="manual-add">
+    <summary>可选：使用本机助手自动接收回调</summary>
+    <p class="field-note">希望授权后自动添加账号时，可下载并在浏览器所在电脑运行助手。</p>
+    <div class="btn-group">
+      <button class="btn btn-secondary" onclick="startAuthWithHelper()">检测助手并授权</button>
+      <a class="btn btn-secondary" href="/web/login/download?as=py" download id="helper-py-link">{ic['download']}授权助手 web_login.py</a>
+      <a class="btn btn-secondary" href="/web/login/download?as=bat" download id="bat-link">{ic['download']}start_auth.bat</a>
+      <a class="btn btn-secondary" href="/web/login/download?as=sh" download id="sh-link">{ic['download']}start_auth.sh</a>
+    </div>
+  </details>
   <details class="manual-add">
     <summary>手动填写凭证添加账号</summary>
     <form id="manual-form" class="manual-grid">
@@ -2385,6 +2369,30 @@ def _web_login_html() -> str:
 </main>
 </div>
 <script>
+// Attach CSRF only to same-origin requests; the local helper never receives
+// the administrator cookie or CSRF secret. Redirect expired sessions to login.
+const adminFetch=window.fetch.bind(window);
+window.fetch=async function(input,options){{
+  var url=new URL(typeof input==='string'?input:input.url,location.href);
+  var opts=Object.assign({{}},options||{{}});
+  if(url.origin===location.origin){{
+    var headers=new Headers(opts.headers||(input instanceof Request?input.headers:undefined));
+    var method=String(opts.method||(input instanceof Request?input.method:'GET')).toUpperCase();
+    if(!['GET','HEAD','OPTIONS'].includes(method)){{
+      var meta=document.querySelector('meta[name="admin-csrf"]');
+      if(meta) headers.set('X-Admin-CSRF',meta.content);
+    }}
+    opts.headers=headers;
+  }}
+  var response=await adminFetch(input,opts);
+  if(response.status===401&&url.origin===location.origin) location.replace('/admin/login');
+  return response;
+}};
+async function adminLogout(){{
+  var result=await postJSON('/api/admin/logout',{{}});
+  if(result.success) location.replace('/admin/login');
+  else showToast('退出失败',result.error||'请重试',false);
+}}
 function applyTheme(theme,persist){{
   var t=theme==='dark'?'dark':'light';
   document.documentElement.setAttribute('data-theme',t);
@@ -2597,8 +2605,8 @@ function randomDigits(n) {{ var s='';while(s.length<n)s+=Math.floor(Math.random(
 function randomBase64Url(n) {{ var a=new Uint8Array(n); if(window.crypto&&crypto.getRandomValues){{ crypto.getRandomValues(a) }} else {{ for(var i=0;i<n;i++)a[i]=Math.floor(Math.random()*256) }} return btoa(String.fromCharCode.apply(null,a)).replace(/[+]/g,'-').split('/').join('_').replace(/=+$/,'') }}
 function buildChallenge() {{ currentCodeVerifier=randomBase64Url(32); return sha256Base64Url(currentCodeVerifier) }}
 async function buildAuthUrl() {{
-  // Trae 授权页强制要求回调为 http://127.0.0.1:<port>/authorize，
-  // 因此必须由本机 web_login.py 监听并转发凭据到服务器。
+  // Trae requires a loopback callback. The default workflow imports the
+  // pasted callback URL; an optional local helper can receive it automatically.
   var cb = 'http://127.0.0.1:{listener_port}/authorize';
   var mid = randomHex(32), did = randomDigits(19), tid = state.traceId;
   var p = new URLSearchParams({{
@@ -2663,23 +2671,30 @@ function pickHelperPlatformScript() {{
   if (sh) sh.style.display = isWindows ? 'none' : 'inline-flex';
 }}
 refreshHelperDownloadLinks();
-async function startAuth() {{
-  try {{
+async function startAuthWithHelper() {{
   var ok = await checkLocalListener();
   if (!ok) {{
     showMsg('auth-msg', localHelperError || '未检测到本机授权助手，请先下载并运行当前页面的授权助手。', false);
     pickHelperPlatformScript();
     return;
   }}
-  state.traceId = uuid();
-  var url = await buildAuthUrl();
-  var w = window.open(url, 'trae-relay-oauth', 'width=560,height=760');
+  return startAuth();
+}}
+async function startAuth() {{
+  // Open synchronously so waiting for the server cannot trigger popup blocking.
+  var w = window.open('', 'trae-relay-oauth', 'width=560,height=760');
   if (!w) {{ showMsg('auth-msg','浏览器已拦截，请允许弹窗',false); return; }}
+  try {{
+  var grant = await postJSON('/api/admin/oauth-state',{{}});
+  if(!grant.success) throw new Error(grant.error||'无法发起授权，请重新登录');
+  state.traceId = grant.state;
+  var url = await buildAuthUrl();
+  w.location.href = url;
   state.win = w;
   document.getElementById('loading').style.display='block';
   document.getElementById('auth-btn').disabled=true;
   var poll = setInterval(function(){{ if(w.closed){{ clearInterval(poll);document.getElementById('loading').style.display='none';document.getElementById('auth-btn').disabled=false; }} }},700);
-  }} catch(e) {{ showMsg('auth-msg',String(e),false); document.getElementById('loading').style.display='none'; document.getElementById('auth-btn').disabled=false; }}
+  }} catch(e) {{ if(w&&!w.closed) w.close(); showMsg('auth-msg',String(e),false); document.getElementById('loading').style.display='none'; document.getElementById('auth-btn').disabled=false; }}
 }}
 
 let usageRefreshing = false;
@@ -3166,8 +3181,9 @@ setInterval(function(){{
 }},10000);
 refreshOverview();
 window.addEventListener('message',function(ev){{
+  if (ev.origin!=='http://127.0.0.1:{listener_port}') return;
   if (!ev.data||ev.data.type!=='trae-relay-web-login') return;
-  if (state.traceId&&ev.data.loginTraceId!==state.traceId) return;
+  if (!state.traceId||ev.data.loginTraceId!==state.traceId||ev.source!==state.win) return;
   if (ev.data.success) {{ showMsg('auth-msg','授权成功，凭证已写入服务器',true); setTimeout(function(){{ location.reload(); }},800); }}
   else {{ showMsg('auth-msg',ev.data.error||'授权失败',false); }}
   document.getElementById('loading').style.display='none';
@@ -4195,6 +4211,17 @@ setInterval(loadAutoCheckin,60000);
 syncSelection();
 window.addEventListener('resize',syncSelection);
 if(document.fonts&&document.fonts.ready) document.fonts.ready.then(syncSelection);
+var callbackForm=document.getElementById('callback-form');
+if(callbackForm) callbackForm.addEventListener('submit',async function(e){{
+  e.preventDefault();
+  var input=document.getElementById('callback-url'),button=document.getElementById('callback-submit');
+  button.disabled=true;button.textContent='正在导入…';
+  try{{
+    var d=await postJSON('/api/admin/oauth-import',{{callback_url:input.value}},45000);
+    showMsg('callback-msg',d.success?'授权成功，账号已导入':d.error||'导入失败',d.success);
+    if(d.success){{ input.value=''; if(state.win&&!state.win.closed) state.win.close(); setTimeout(function(){{location.reload();}},700); }}
+  }}finally{{button.disabled=false;button.textContent='导入授权账号';}}
+}});
 var manualForm=document.getElementById('manual-form');
 if(manualForm) manualForm.addEventListener('submit',async function(e){{
   e.preventDefault();var fd=new FormData(e.target);
@@ -12309,6 +12336,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Trae CN Relay", version=APP_VERSION, lifespan=lifespan)
+admin_auth.install(app, admin_auth.AdminAuth.from_env())
 
 
 @app.exception_handler(_ModelAccountUnavailable)
@@ -12430,23 +12458,13 @@ async def api_usage_last():
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
+    # Management has its own administrator session and CSRF enforcement.
+    # Model API keys never grant administrator privileges.
+    if admin_auth.management_path(request.url.path):
+        return await call_next(request)
     if not API_KEYS:
         return await call_next(request)
-    if request.url.path == "/api/model-test":
-        # Keep the dashboard probe usable on loopback/RFC1918 management
-        # networks without exposing a billable model endpoint to the public.
-        client_host = str(getattr(request.client, "host", "") or "").strip()
-        try:
-            client_ip = ipaddress.ip_address(client_host)
-        except ValueError:
-            client_ip = None
-        if client_ip is not None and (
-            client_ip.is_loopback
-            or client_ip.is_private
-            or client_ip.is_link_local
-        ):
-            return await call_next(request)
-    if request.url.path in PUBLIC_PATHS or request.url.path.startswith(PUBLIC_PATH_PREFIXES):
+    if request.url.path in PUBLIC_PATHS:
         return await call_next(request)
     header = request.headers.get("authorization", "")
     if header.lower().startswith("bearer "):
@@ -12457,7 +12475,7 @@ async def auth_middleware(request: Request, call_next):
         # Anthropic clients (Claude Code) authenticate with ``x-api-key``
         # instead of a bearer Authorization header.
         token = request.headers.get("x-api-key", "").strip()
-    if token not in API_KEYS:
+    if not any(secrets.compare_digest(token.encode(), key.encode()) for key in API_KEYS):
         return _openai_error(401, "Invalid API key", "authentication_error")
     return await call_next(request)
 
@@ -12836,8 +12854,8 @@ async def v1_index(request: Request):
 # ---- Web login endpoints ----
 
 @app.get("/web/login", response_class=HTMLResponse)
-async def web_login():
-    return _web_login_html()
+async def web_login(request: Request):
+    return _web_login_html(request.state.admin_session.csrf)
 
 
 def _helper_generated_at() -> str:
@@ -12994,6 +13012,37 @@ async def oauth_callback(request: Request):
     except ValueError as e:
         return HTMLResponse(_oauth_result_html(False, str(e), trace_id), status_code=400)
     return HTMLResponse(_oauth_result_html(True, "登录成功，凭证已写入服务器", trace_id))
+
+
+@app.post("/api/admin/oauth-import")
+async def import_oauth_callback(request: Request):
+    """Import a pasted loopback URL under the initiating administrator session."""
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > oauth_callback_parser.MAX_CALLBACK_LENGTH * 2:
+            return JSONResponse({"success": False, "error": "授权回调内容过长"}, status_code=413)
+    try:
+        body = json.loads(raw)
+        if not isinstance(body, dict):
+            raise ValueError("请求格式无效")
+        params = oauth_callback_parser.parse_callback_url(body.get("callback_url"), LOCAL_LISTENER_PORT)
+    except (ValueError, UnicodeDecodeError) as exc:
+        # Never return the original callback URL or JSON decoding context.
+        message = str(exc) if not isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)) else "请求格式无效"
+        return JSONResponse({"success": False, "error": message}, status_code=400)
+    trace = params.get("loginTraceID") or params.get("login_trace_id") or ""
+    service = request.app.state.admin_auth
+    if not service.consume_grant(trace, request.state.admin_session):
+        return JSONResponse({"success": False, "error": "授权已过期、已使用或不属于当前会话，请重新发起授权"}, status_code=403)
+    try:
+        parsed = await _parse_oauth_params(params)
+        if not parsed.get("token"):
+            return JSONResponse({"success": False, "error": "回调中没有有效凭证，请重新完成 Trae 授权"}, status_code=400)
+        account_id = auth.add_account(parsed)
+    except (ValueError, TypeError, AttributeError):
+        return JSONResponse({"success": False, "error": "授权凭证格式无效，请重新发起授权"}, status_code=400)
+    return JSONResponse({"success": True, "account_id": account_id})
 
 
 @app.post("/api/web-auth")

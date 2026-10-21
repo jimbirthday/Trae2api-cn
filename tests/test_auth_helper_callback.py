@@ -16,7 +16,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.admin_client import TestClient
 
 from src import main
 
@@ -63,6 +63,7 @@ def test_downloaded_helper_forwards_callback_to_baked_deployment_address(
                     "path": self.path,
                     "host": self.headers["Host"],
                     "content_type": self.headers["Content-Type"],
+                    "import_token": self.headers["X-Relay-Import-Token"],
                     "payload": json.loads(body),
                 }
             )
@@ -167,6 +168,7 @@ def test_downloaded_helper_forwards_callback_to_baked_deployment_address(
         assert request["path"] == relay_prefix + "/api/web-auth"
         assert request["host"] == relay_host
         assert request["content_type"] == "application/json"
+        assert request["import_token"] == "synthetic-test-trace"
         assert request["payload"]["token"] == "synthetic-test-access-token"
         assert request["payload"]["refreshToken"] == "synthetic-test-refresh-token"
         assert request["payload"]["userId"] == "synthetic-test-user"

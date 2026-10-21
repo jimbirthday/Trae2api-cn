@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from fastapi.testclient import TestClient
+from tests.admin_client import TestClient
 
 from src import auth
 from src import main as main_module

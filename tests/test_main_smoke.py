@@ -21,7 +21,7 @@ os.environ["TRAE_CLI_OUTPUT_MODE"] = "json"
 os.environ["TRAE_CLI_DISABLE_TOOLS"] = "false"
 os.environ["RELAY_API_KEYS"] = "smoke-key"
 
-from fastapi.testclient import TestClient
+from tests.admin_client import TestClient
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from src import main as main_module
@@ -3849,7 +3849,7 @@ class MainCliSmokeTests(unittest.TestCase):
             400,
         )
 
-    def test_model_test_requires_auth_outside_management_networks(self):
+    def test_model_test_delegates_to_admin_guard_regardless_of_network(self):
         async def call_from(host, authorization=""):
             headers = []
             if authorization:
@@ -3874,8 +3874,8 @@ class MainCliSmokeTests(unittest.TestCase):
 
         with patch.object(main_module, "API_KEYS", ["smoke-key"]):
             public_response, public_downstream = asyncio.run(call_from("8.8.8.8"))
-            self.assertEqual(public_response.status_code, 401)
-            public_downstream.assert_not_awaited()
+            self.assertEqual(public_response.status_code, 200)
+            public_downstream.assert_awaited_once()
 
             private_response, private_downstream = asyncio.run(
                 call_from("192.168.5.10")
@@ -4019,6 +4019,7 @@ class MainCliSmokeTests(unittest.TestCase):
         response = self.client.get(
             "/authorize",
             params={
+                "login_trace_id": self.client.post("/api/admin/oauth-state", json={}).json()["state"],
                 "userJwt": user_jwt,
                 "userInfo": user_info,
                 "host": "https://trae-api-cn.mchost.guru",

@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.testclient import TestClient
+from tests.admin_client import TestClient
 
 from src import anthropic_api, continuation, images, main as main_module, sse
 from src.main import app

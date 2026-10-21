@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+from tests.admin_client import TestClient
 
 from src import main as main_module
 

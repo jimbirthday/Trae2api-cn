@@ -64,7 +64,7 @@ Trae CN / Trae Solo CN 模型反代。把 Trae 的 Remote / IDE / Work 模型通
 
 ```bash
 cp .env.example .env
-# 编辑 .env 配置 TRAE_AUTH_SOURCE 和上游模式
+# 编辑 .env 配置 RELAY_ADMIN_PASSWORD（至少 12 位）、TRAE_AUTH_SOURCE 和上游模式
 pip install -r requirements.txt
 uvicorn src.main:app --host 0.0.0.0 --port 8000
 ```
@@ -97,38 +97,84 @@ docker compose -f docker-compose.image.yml up -d
 中，可通过宿主地址访问 relay，或显式把两者加入同一网络。宿主端口由
 `RELAY_PORT` 控制；容器监听端口由 `.env` 的 `PORT` 控制，两者默认都是 `8000`。
 
-### 从源码构建（开发或离线场景）
+### 从源码构建（包含本地修改）
 
-源码构建仍可用于开发和没有外网的部署环境：
+要使用当前源码中的功能，请在源码目录构建。`docker pull ...:latest` 只会获取
+远端已发布镜像，不会包含本地修改：
 
 ```bash
 cp .env.example .env
+# 编辑 .env：设置 RELAY_ADMIN_PASSWORD（至少 12 位）和 RELAY_API_KEYS
+# 默认 TRAE_AUTH_SOURCE=web-login，首次启动不需要已有 Trae 凭证
 docker compose up -d --build
 ```
 
 容器默认监听 `8000` 端口。`RELAY_PORT` 修改宿主机发布端口，不修改容器内
 监听端口；调整端口映射后需执行 `docker compose up -d --force-recreate`，
-仅重启旧容器不会改变映射。
+仅重启旧容器不会改变映射。源码 Compose 默认只启动一个 relay 容器，不要求
+预先创建 `new-api` 网络。若原来通过 `docker-compose.image.yml` 启动，保留已有
+`.env` 和 `data/`，切换执行 `docker compose up -d --build --force-recreate` 即可；
+不要再次复制配置示例覆盖现有 `.env`。已有配置请将 `TRAE_AUTH_SOURCE` 改为
+`web-login`，并补充管理员密码。
 Actions 发布的镜像会把提交 SHA 写入 `RELAY_BUILD_REVISION` 镜像 label，并由
 `/v1/status` 返回，便于确认运行容器与源码版本一致。手动源码构建可设置
 `RELAY_BUILD_REVISION=$(git rev-parse --short HEAD)`。
 
 ## 网页授权（推荐：web-login 模式）
 
+管理控制台需要独立的管理员密码。在 `.env` 中设置
+`RELAY_ADMIN_PASSWORD`（至少 12 位，建议使用密码管理器生成的随机密码），
+重启服务后访问 `/web/login`，会自动跳转到 `/admin/login`。
+Docker 部署修改 `.env` 后需重新创建容器：源码部署执行
+`docker compose up -d --build --force-recreate`，预构建镜像部署执行
+`docker compose -f docker-compose.image.yml up -d --force-recreate`；仅 restart
+不会更新 Compose 注入的环境变量。
+未配置或密码过短时，管理面板和管理 API 均拒绝访问。
+`RELAY_API_KEYS` 仅用于模型调用，不能登录管理员或操作管理接口。
+
+管理员会话有效期为 12 小时，Cookie 为 HttpOnly、SameSite=Lax；HTTPS 下自动
+启用 Secure。公网部署应使用 HTTPS；反向代理需正确设置可信代理和协议头，
+也可设置 `RELAY_ADMIN_COOKIE_SECURE=true`。登录每个 IP 最多 5 次 / 5 分钟，
+另有全局尝试上限。控制台的「退出管理」只注销管理员会话，保留 Trae 账号。
+控制台管理写请求均要求会话和 CSRF 校验，内网访问也不豁免。
+
+密码也可通过 `RELAY_ADMIN_PASSWORD_FILE` 指定的文件提供（优先于密码变量）。
+密码更换后重启服务即可生效，并使旧会话及待完成授权失效。会话、限流和授权状态
+保存在进程内存，当前请使用默认的单个 Uvicorn worker；服务重启后需要重新登录。
+管理员接口包括账号、设置、签到、用量、模型测试、`/v1/status` 和 API 文档。
+健康检查、模型列表及不含凭据的助手下载保持公开；模型调用仍按 API Key 配置鉴权。
+
+本机助手只使用控制台签发的 10 分钟有效、一次性的账号导入凭证，
+无需保存或输入管理员密码；它只是可选的自动回调方式，默认流程不需要运行助手。
+
 > **为什么需要一个本机助手？**
 > Trae 授权页强制要求授权回调地址为 `http://127.0.0.1:<端口>/authorize`，
-> 且浏览器网页出于安全沙箱无法监听本机 TCP 端口，因此必须由本机运行
-> 一个轻量监听器来接收回调并转发给服务器。**这是 Trae 的限制，不是本项目的缺陷。**
+> `127.0.0.1` 是浏览器所在电脑，不是远程 Docker 服务器。把助手移进服务器容器
+> 无法接收电脑浏览器的回调。默认流程通过粘贴完整回调地址导入，无需额外服务；
+> 希望自动接收回调时，才需要可选的本机助手。
 
-### 首次使用（只需一次）
+### 默认方式：纯网页授权，无需本机助手
 
-1. 打开 `http://服务器:8000/web/login`
-2. 点击「使用 Trae 网页授权登录」，页面会自动检测本机助手是否在线
+1. 打开 `http://服务器:8000/web/login`，输入管理员密码。
+2. 在「账号与签到」点击「使用 Trae 网页授权登录」，在弹出的 Trae 页面完成登录和授权。
+3. 授权成功后跳转到 `http://127.0.0.1:8765/authorize?...`。没有本机助手时显示
+   「无法访问此网站」是正常情况，不需要启动服务来打开它。
+4. 复制该页面地址栏的**完整地址**，回到控制台粘贴到「授权回调地址」，点击「导入授权账号」。
+5. 服务器解析凭据并保存账号，导入成功后自动清空输入框。整个部署仅需 relay 容器。
+
+请在 10 分钟内完成，并保持发起授权的管理员会话有效。回调只能导入一次；
+过期、重复使用或切换管理员会话后，需要重新点击授权。回调地址包含账号凭据，
+只粘贴到自己的控制台。Trae 自身的回调限制仍然存在，因此此方式需要复制粘贴一步。
+
+### 可选：本机助手自动接收回调
+
+1. 打开 `http://服务器:8000/web/login`，输入管理员密码
+2. 展开「可选：使用本机助手自动接收回调」，点击「检测助手并授权」
 3. 若提示「未检测到本机授权助手」，点击页面上的下载按钮获取
    `web_login.py` / `start_auth.bat` / `start_auth.sh`
    （三个按钮都由服务端按当前部署实时生成，**IP 与端口已写好，无需手动修改**）
 4. 双击运行 `start_auth.bat`（Windows）或 `sh start_auth.sh`（macOS/Linux），保持窗口开启
-5. 回到页面重新点击授权，浏览器弹出 Trae 授权页，确认登录即可
+5. 回到页面重新点击「检测助手并授权」，浏览器弹出 Trae 授权页，确认登录即可
 6. 凭据自动写入服务器，页面自动刷新显示「已登录」
 
 > 助手模板随 Docker 镜像打包，下载由当前部署直接提供，不需要访问 GitHub。
@@ -136,7 +182,7 @@ Actions 发布的镜像会把提交 SHA 写入 `RELAY_BUILD_REVISION` 镜像 lab
 > 本机需要 Python 3。
 > 下载版可直接运行 `python web_login.py`，无需指定 IP 或端口。
 
-### 之后每次授权
+### 使用助手时的后续授权
 
 本机助手已在线并绑定当前部署时，直接点授权即可。服务器地址、映射端口或助手
 监听端口变更后，关闭旧助手并从当前控制台重新下载，避免凭据送到旧地址。
@@ -168,7 +214,7 @@ Actions 发布的镜像会把提交 SHA 写入 `RELAY_BUILD_REVISION` 镜像 lab
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `TRAE_AUTH_SOURCE` | `auto` | 认证来源 |
+| `TRAE_AUTH_SOURCE` | 示例为 `web-login` | 认证来源；Docker 首次启动可直接通过网页添加账号 |
 | `UPSTREAM_MODE` | `remote` | 上游模式：`remote` 为 Trae Remote Agent；`work`/`work-agent` 为 TraeWork Work-tier Remote；`solo`/`ide` 为 TraeCode raw；另有 `cli` / `web`；`raw` 仅供内部诊断 |
 | `TRAE_WEB_SLOT_TIMEOUT` | `60` | 等待账号并发槽位的超时（秒）；所有账号槽位占满时请求排队等待 |
 | `TRAE_VERBOSE_REASONING` | 空 | 设为 `1` 时输出完整思考链；默认只保留压缩后的关键结论 |

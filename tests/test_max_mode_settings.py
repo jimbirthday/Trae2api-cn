@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 os.environ.setdefault("TRAE_AUTH_SOURCE", "cli")
 os.environ.setdefault("RELAY_API_KEYS", "smoke-key")
 
-from fastapi.testclient import TestClient
+from tests.admin_client import TestClient
 
 from src import auth, trae_remote_client
 from src import main as main_module
